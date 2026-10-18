@@ -1,0 +1,56 @@
+name: Publish engine
+
+# The engine's release workflow hands each helper release over as a branch
+# incoming-engine/engine-vX.Y.Z: release.json, notes.md, the tarball, its .sig and SHA256SUMS
+# (binaries only). This checks the signature against
+# engine-key.pub on main, publishes the release engine-vX.Y.Z (never marked "latest": Sonata's legacy
+# updater reads releases/latest) and deletes the branch.
+
+on:
+  push:
+    branches: ['incoming-engine/**']
+
+concurrency:
+  group: publish-engine
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 2   # the hand-over commit and main's tip under it
+      - name: Check the hand-over
+        id: meta
+        run: |
+          set -euo pipefail
+          tag="$(jq -r .tag release.json)"; v="$(jq -r .version release.json)"; f="$(jq -r .file release.json)"
+          echo "$tag" | grep -Eqx 'engine-v[0-9]+\.[0-9]+\.[0-9]+' || { echo "::error::bad tag $tag"; exit 1; }
+          [ "$GITHUB_REF_NAME" = "incoming-engine/$tag" ] || { echo "::error::branch does not match $tag"; exit 1; }
+          [ "$tag" = "engine-v$v" ] && [ "$f" = "sonata-engine-$v-linux-x86_64.tar.gz" ] || { echo "::error::names do not match"; exit 1; }
+          sha256sum -c --strict SHA256SUMS
+          [ "$(sha256sum "$f" | cut -c1-64)" = "$(jq -r .sha256 release.json)" ] || { echo "::error::sha256 differs from release.json"; exit 1; }
+          base64 -d "$f.sig" > "$RUNNER_TEMP/sig.bin"
+          openssl pkeyutl -verify -pubin -inkey engine-key.pub -rawin -in "$f" -sigfile "$RUNNER_TEMP/sig.bin"
+          # binaries only: nothing but the tarball, its signature and the metadata
+          extra="$(git diff --name-only HEAD^ HEAD | grep -vxE "release.json|notes.md|SHA256SUMS|$f|$f.sig" || true)"
+          [ -z "$extra" ] || { echo "::error::unexpected files in the hand-over: $extra"; exit 1; }
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"; echo "file=$f" >> "$GITHUB_OUTPUT"
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${{ steps.meta.outputs.tag }}"; f="${{ steps.meta.outputs.file }}"
+          gh release create "$tag" -R "$GITHUB_REPOSITORY" --target main --latest=false --title "Sonata engine ${tag#engine-v}" --notes-file notes.md "$f" "$f.sig" SHA256SUMS
+      - name: Delete the hand-over branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/heads/$GITHUB_REF_NAME"

@@ -64,7 +64,7 @@ jobs:
           tag="${{ steps.meta.outputs.tag }}"
           npm ci
           npm test
-          # the archive's own gates where it has them (0.15.19 predates them)
+          # the archive's own gates
           if [ -f tools/verdicts.js ]; then node tools/verdicts.js --check; fi
           if [ -f tools/set-version.js ]; then node tools/set-version.js --verify "$tag"; fi
           [ "v$(node -p 'require("./package.json").version')" = "$tag" ] || { echo "::error::package.json version is not $tag"; exit 1; }

@@ -2,9 +2,10 @@ name: Update feed
 
 # Rebuilds latest.json (Stable) and latest-dev.json (Development: dev prereleases and stable
 # releases) from the releases published here, signs them with the SONATA_FEED_KEY secret and commits
-# them to main: after every release, daily, and on demand. The tools come from the newest release's
-# source archive (tools/build-feed.js downloads and hashes the AppImage, so a feed never points at a
-# file that doesn't exist or doesn't match; tools/sign-feed.js signs). Never edit the feeds by hand.
+# them to main: after every release, daily, and on demand. The tools come from the newest Sonata
+# release's source archive (v* tags; the helper's engine-v* releases are skipped). tools/build-feed.js
+# downloads and hashes the AppImage, so a feed never points at a file that doesn't exist or doesn't
+# match; tools/sign-feed.js signs. Never edit the feeds by hand.
 
 on:
   workflow_call:
@@ -40,7 +41,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          tag="$(gh release list -R "$GITHUB_REPOSITORY" --exclude-drafts --limit 1 --json tagName -q '.[0].tagName')"
+          # the newest Sonata release (v*), never a helper release (engine-v*)
+          tag="$(gh release list -R "$GITHUB_REPOSITORY" --exclude-drafts --limit 50 --json tagName -q '[.[] | select(.tagName | startswith("v"))][0].tagName // ""')"
           if [ -z "$tag" ]; then echo "::notice::no release yet; nothing to publish"; exit 0; fi
           mkdir -p "$RUNNER_TEMP/tools"
           gh release download "$tag" -R "$GITHUB_REPOSITORY" -p "sonata-${tag#v}-source.tar.gz" -p SHA256SUMS -D "$RUNNER_TEMP/tools"
