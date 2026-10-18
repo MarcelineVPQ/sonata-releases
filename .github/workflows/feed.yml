@@ -1,0 +1,92 @@
+name: Update feed
+
+# Rebuilds latest.json (Stable) and latest-dev.json (Development: dev prereleases and stable
+# releases) from the releases published here, signs them with the SONATA_FEED_KEY secret and commits
+# them to main: after every release, daily, and on demand. The tools come from the newest release's
+# source archive (tools/build-feed.js downloads and hashes the AppImage, so a feed never points at a
+# file that doesn't exist or doesn't match; tools/sign-feed.js signs). Never edit the feeds by hand.
+
+on:
+  workflow_call:
+    secrets:
+      SONATA_FEED_KEY:
+        required: true
+  workflow_dispatch:
+  schedule:
+    - cron: "37 6 * * *"
+
+concurrency:
+  group: feed
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  feed:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: main
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - name: Tools from the newest release's source
+        id: tools
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="$(gh release list -R "$GITHUB_REPOSITORY" --exclude-drafts --limit 1 --json tagName -q '.[0].tagName')"
+          if [ -z "$tag" ]; then echo "::notice::no release yet; nothing to publish"; exit 0; fi
+          mkdir -p "$RUNNER_TEMP/tools"
+          gh release download "$tag" -R "$GITHUB_REPOSITORY" -p "sonata-${tag#v}-source.tar.gz" -p SHA256SUMS -D "$RUNNER_TEMP/tools"
+          (cd "$RUNNER_TEMP/tools" && sha256sum -c SHA256SUMS --ignore-missing --strict && tar -xzf "sonata-${tag#v}-source.tar.gz" && mv "sonata-${tag#v}" src)
+          echo "src=$RUNNER_TEMP/tools/src" >> "$GITHUB_OUTPUT"
+      - name: Feed tests
+        if: steps.tools.outputs.src != ''
+        run: node --test "${{ steps.tools.outputs.src }}/test/update-feed.test.js"
+      - name: Build latest.json and latest-dev.json
+        if: steps.tools.outputs.src != ''
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        # Exit 2 = no matching release yet: nothing to publish.
+        run: |
+          src="${{ steps.tools.outputs.src }}"
+          node "$src/tools/build-feed.js" --repo "$GITHUB_REPOSITORY" --channel stable --out latest.json || [ $? -eq 2 ]
+          node "$src/tools/build-feed.js" --repo "$GITHUB_REPOSITORY" --channel dev --out latest-dev.json || [ $? -eq 2 ]
+      - name: Sign
+        if: steps.tools.outputs.src != ''
+        env:
+          SONATA_FEED_KEY: ${{ secrets.SONATA_FEED_KEY }}
+        run: |
+          src="${{ steps.tools.outputs.src }}"
+          [ -n "$SONATA_FEED_KEY" ] || { echo "::error::the SONATA_FEED_KEY secret is not set"; exit 1; }
+          if [ -f latest.json ]; then node "$src/tools/sign-feed.js" latest.json; fi
+          if [ -f latest-dev.json ]; then node "$src/tools/sign-feed.js" latest-dev.json; fi
+      - name: Commit if changed
+        id: commit
+        if: steps.tools.outputs.src != ''
+        run: |
+          files=(); for f in latest.json latest.json.sig latest-dev.json latest-dev.json.sig; do [ -f "$f" ] && files+=("$f"); done
+          if [ ${#files[@]} -gt 0 ] && [ -n "$(git status --porcelain "${files[@]}")" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add "${files[@]}"
+            git commit -m "Update latest.json / latest-dev.json"
+            git push origin HEAD:main
+            echo "pushed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Feeds unchanged."
+          fi
+      # gh attestation verify latest.json -R MarcelineVPQ/sonata-releases
+      - name: Attest build provenance (feeds)
+        if: steps.commit.outputs.pushed == 'true'
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: |
+            latest*.json
+            latest*.json.sig

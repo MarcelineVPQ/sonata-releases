@@ -1,0 +1,123 @@
+name: Publish
+
+# Sonata's release workflow hands each release over as a branch incoming/vX.Y.Z(-dev.N): one commit
+# with release.json (tag, version, title, source commit, the archive's SHA-256), notes.md and the GPL
+# source archive sonata-X.Y.Z-source.tar.gz. This builds the AppImage from exactly that archive, so
+# the published source is proven complete by every release, attests it, publishes the release
+# (AppImage, source archive, SHA256SUMS; Stable also latest-linux.yml), refreshes the signed feeds
+# and deletes the branch. A release.json with "dry_run": true builds and checks everything but
+# publishes nothing.
+
+on:
+  push:
+    branches: ['incoming/**']
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      dry_run: ${{ steps.meta.outputs.dry_run }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: incoming
+      - name: Read and check the hand-over
+        id: meta
+        run: |
+          set -euo pipefail
+          cd incoming
+          tag="$(node -p 'require("./release.json").tag')"; v="${tag#v}"
+          echo "$tag" | grep -Eqx 'v[0-9]+\.[0-9]+\.[0-9]+(-dev\.[0-9]+)?' || { echo "::error::bad tag $tag"; exit 1; }
+          [ "$GITHUB_REF_NAME" = "incoming/$tag" ] || [ "$(node -p 'require("./release.json").dry_run === true')" = true ] || { echo "::error::branch $GITHUB_REF_NAME does not match $tag"; exit 1; }
+          [ "$(node -p 'require("./release.json").version')" = "$v" ] || { echo "::error::version does not match the tag"; exit 1; }
+          src="sonata-$v-source.tar.gz"
+          [ "$(node -p 'require("./release.json").source')" = "$src" ] || { echo "::error::unexpected source file name"; exit 1; }
+          echo "$(node -p 'require("./release.json").source_sha256')  $src" | sha256sum -c --strict
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "dry_run=$(node -p 'require("./release.json").dry_run === true')" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - name: Unpack the source archive
+        run: |
+          set -euo pipefail
+          v="${{ steps.meta.outputs.tag }}"; v="${v#v}"
+          tar -xzf "incoming/sonata-$v-source.tar.gz"
+          mv "sonata-$v" src
+      - name: Tests (from the archive)
+        working-directory: src
+        run: |
+          set -euo pipefail
+          tag="${{ steps.meta.outputs.tag }}"
+          npm ci
+          npm test
+          # the archive's own gates where it has them (0.15.19 predates them)
+          if [ -f tools/verdicts.js ]; then node tools/verdicts.js --check; fi
+          if [ -f tools/set-version.js ]; then node tools/set-version.js --verify "$tag"; fi
+          [ "v$(node -p 'require("./package.json").version')" = "$tag" ] || { echo "::error::package.json version is not $tag"; exit 1; }
+      - name: Build AppImage (from the archive)
+        working-directory: src
+        run: npx electron-builder --linux AppImage --publish never
+      - name: Collect files and SHA256SUMS
+        run: |
+          set -euo pipefail
+          tag="${{ steps.meta.outputs.tag }}"; v="${tag#v}"
+          mkdir -p out
+          cp "src/dist/sonata-$v-x86_64.AppImage" "incoming/sonata-$v-source.tar.gz" out/
+          case "$v" in *-dev.*) ;; *) cp src/dist/latest-linux.yml out/ ;; esac
+          (cd out && sha256sum -- * > SHA256SUMS && cat SHA256SUMS)
+      # Build provenance: a signed attestation that this workflow built these files from this hand-over
+      # (gh attestation verify FILE -R MarcelineVPQ/sonata-releases). On top of the Ed25519 feed
+      # signature and the SHA-512 Sonata checks.
+      - name: Attest build provenance
+        if: steps.meta.outputs.dry_run != 'true'
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: out/*
+      - name: Publish the release
+        if: steps.meta.outputs.dry_run != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${{ steps.meta.outputs.tag }}"
+          dev="$(node -p 'require("./incoming/release.json").dev === true')"
+          title="$(node -p 'require("./incoming/release.json").title')"
+          gh release create "$tag" -R "$GITHUB_REPOSITORY" --target main --draft $([ "$dev" = true ] && echo --prerelease) --title "$title" --notes-file incoming/notes.md
+          gh release upload "$tag" -R "$GITHUB_REPOSITORY" out/*
+          if [ "$dev" = true ]; then gh release edit "$tag" -R "$GITHUB_REPOSITORY" --draft=false; else gh release edit "$tag" -R "$GITHUB_REPOSITORY" --draft=false --latest; fi
+
+  feed:
+    needs: build
+    if: needs.build.outputs.dry_run != 'true'
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    uses: ./.github/workflows/feed.yml
+    secrets: inherit
+
+  cleanup:
+    needs: [build, feed]
+    if: ${{ always() && needs.build.result == 'success' && (needs.feed.result == 'success' || needs.feed.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Delete the hand-over branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/heads/$GITHUB_REF_NAME"
