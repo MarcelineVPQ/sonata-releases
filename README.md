@@ -13,6 +13,8 @@ Project page: <https://github.com/MarcelineVPQ/apple-music-for-linux>
 | Releases → `sonata-X.Y.Z-source.tar.gz` | the complete source of that release (GPL-3.0) |
 | Releases → `SHA256SUMS` | SHA-256 of every file in the release |
 | `latest.json`, `latest-dev.json` (+ `.sig`) | the update feeds Sonata reads (Stable, Development), Ed25519-signed |
+| Releases → `engine-vX.Y.Z` | the Precise timing helper (`sonata-engine-X.Y.Z-linux-x86_64.tar.gz` + `.sig`), a separate download Sonata installs on request; always marked *Pre-release* |
+| `latest-engine.json`, `latest-engine-dev.json` (+ `.sig`) | the helper's feeds (Stable, Development), signed with the helper's key (`engine-key.pub`) |
 
 Sonata checks the feed's signature against the key built into the app, then the download's size and
 SHA-512, before it installs anything. Never edit the feeds by hand: the release workflow writes and

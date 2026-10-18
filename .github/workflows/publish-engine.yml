@@ -1,11 +1,15 @@
 name: Publish engine
 
-# The engine's release workflow hands each helper release over as a branch
-# incoming-engine/engine-vX.Y.Z: release.json, notes.md, the tarball, its .sig and SHA256SUMS
-# (binaries only). This checks the signature against
-# engine-key.pub on main, publishes the release engine-vX.Y.Z as a pre-release (so it never takes "Latest": with
+# The engine's release workflow (private repository) hands each helper release over as a branch
+# incoming-engine/engine-vX.Y.Z[-dev.N]: release.json, notes.md, the tarball, its .sig, SHA256SUMS
+# (binaries only) and the engine feeds it regenerated and signed with the engine key
+# (latest-engine-dev.json, and latest-engine.json for a stable engine, each with its .sig). The engine's
+# private key never comes here: this repository only checks, against engine-key.pub on main.
+# This checks everything, publishes the release as a pre-release (so it never takes "Latest": with
 # --latest=false alone GitHub still shows it as Latest while no Sonata release is newer, and the
-# releases page would lead visitors to the helper) and deletes the branch.
+# releases page would lead visitors to the helper), checks the published asset against the feeds,
+# commits the feeds to main and deletes the branch. Sonata's own feeds (latest.json, latest-dev.json,
+# feed.yml) are never touched here. engine-feed.yml checks the engine feeds again every day.
 
 on:
   push:
@@ -33,17 +37,35 @@ jobs:
         run: |
           set -euo pipefail
           tag="$(jq -r .tag release.json)"; v="$(jq -r .version release.json)"; f="$(jq -r .file release.json)"
-          echo "$tag" | grep -Eqx 'engine-v[0-9]+\.[0-9]+\.[0-9]+' || { echo "::error::bad tag $tag"; exit 1; }
+          echo "$tag" | grep -Eqx 'engine-v[0-9]+\.[0-9]+\.[0-9]+(-dev\.[0-9]+)?' || { echo "::error::bad tag $tag"; exit 1; }
           [ "$GITHUB_REF_NAME" = "incoming-engine/$tag" ] || { echo "::error::branch does not match $tag"; exit 1; }
           [ "$tag" = "engine-v$v" ] && [ "$f" = "sonata-engine-$v-linux-x86_64.tar.gz" ] || { echo "::error::names do not match"; exit 1; }
           sha256sum -c --strict SHA256SUMS
           [ "$(sha256sum "$f" | cut -c1-64)" = "$(jq -r .sha256 release.json)" ] || { echo "::error::sha256 differs from release.json"; exit 1; }
+          git show HEAD^:engine-key.pub > "$RUNNER_TEMP/engine-key.pub"   # the key on main, not one the branch brings
           base64 -d "$f.sig" > "$RUNNER_TEMP/sig.bin"
-          openssl pkeyutl -verify -pubin -inkey engine-key.pub -rawin -in "$f" -sigfile "$RUNNER_TEMP/sig.bin"
-          # binaries only: nothing but the tarball, its signature and the metadata
-          extra="$(git diff --name-only HEAD^ HEAD | grep -vxE "release.json|notes.md|SHA256SUMS|$f|$f.sig" || true)"
+          openssl pkeyutl -verify -pubin -inkey "$RUNNER_TEMP/engine-key.pub" -rawin -in "$f" -sigfile "$RUNNER_TEMP/sig.bin"
+          # binaries only: nothing but the tarball, its signature, the metadata and the engine feeds
+          extra="$(git diff --name-only HEAD^ HEAD | grep -vxE "release.json|notes.md|SHA256SUMS|$f|$f.sig|latest-engine(-dev)?\.json(\.sig)?" || true)"
           [ -z "$extra" ] || { echo "::error::unexpected files in the hand-over: $extra"; exit 1; }
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"; echo "file=$f" >> "$GITHUB_OUTPUT"
+          # the engine feeds: signed with the engine key, and the release's own feed entry names exactly these bytes
+          feeds=""
+          for feed in latest-engine.json latest-engine-dev.json; do
+            git diff --quiet HEAD^ HEAD -- "$feed" "$feed.sig" && continue
+            [ -f "$feed" ] && [ -f "$feed.sig" ] || { echo "::error::$feed without its .sig"; exit 1; }
+            base64 -d "$feed.sig" > "$RUNNER_TEMP/feed.sig"
+            openssl pkeyutl -verify -pubin -inkey "$RUNNER_TEMP/engine-key.pub" -rawin -in "$feed" -sigfile "$RUNNER_TEMP/feed.sig"
+            want="stable"; [ "$feed" = latest-engine-dev.json ] && want="dev"
+            [ "$(jq -r .channel "$feed")" = "$want" ] || { echo "::error::$feed is not the $want feed"; exit 1; }
+            if [ "$(jq -r .tag "$feed")" = "$tag" ]; then
+              [ "$(jq -r .sha256 "$feed")" = "$(sha256sum "$f" | cut -c1-64)" ] && [ "$(jq -r .size "$feed")" = "$(stat -c %s "$f")" ] \
+                || { echo "::error::$feed does not describe $f"; exit 1; }
+              [ "$(jq -r .sig "$feed")" = "$(tr -d '\n' < "$f.sig")" ] || { echo "::error::$feed carries another signature"; exit 1; }
+            fi
+            feeds="$feeds $feed $feed.sig"
+          done
+          if [ -z "$feeds" ]; then echo "::warning::the hand-over carries no engine feed: Sonata will not be offered $tag"; fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"; echo "file=$f" >> "$GITHUB_OUTPUT"; echo "feeds=$feeds" >> "$GITHUB_OUTPUT"
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
@@ -51,6 +73,40 @@ jobs:
           set -euo pipefail
           tag="${{ steps.meta.outputs.tag }}"; f="${{ steps.meta.outputs.file }}"
           gh release create "$tag" -R "$GITHUB_REPOSITORY" --target main --prerelease --latest=false --title "Sonata engine ${tag#engine-v}" --notes-file notes.md "$f" "$f.sig" SHA256SUMS
+      - name: Check the published files against the feeds
+        if: steps.meta.outputs.feeds != ''
+        run: |
+          set -euo pipefail
+          tag="${{ steps.meta.outputs.tag }}"
+          for feed in ${{ steps.meta.outputs.feeds }}; do
+            case "$feed" in *.sig) continue ;; esac
+            url="$(jq -r .url "$feed")"
+            curl -fsSL --retry 5 --retry-delay 5 -o "$RUNNER_TEMP/got.tar.gz" "$url"
+            [ "$(sha256sum "$RUNNER_TEMP/got.tar.gz" | cut -c1-64)" = "$(jq -r .sha256 "$feed")" ] && [ "$(stat -c %s "$RUNNER_TEMP/got.tar.gz")" = "$(jq -r .size "$feed")" ] \
+              || { echo "::error::$feed: the file at $url does not match"; exit 1; }
+            jq -r .sig "$feed" | base64 -d > "$RUNNER_TEMP/t.sig"
+            openssl pkeyutl -verify -pubin -inkey "$RUNNER_TEMP/engine-key.pub" -rawin -in "$RUNNER_TEMP/got.tar.gz" -sigfile "$RUNNER_TEMP/t.sig"
+          done
+      - name: Commit the engine feeds to main
+        if: steps.meta.outputs.feeds != ''
+        run: |
+          set -euo pipefail
+          tag="${{ steps.meta.outputs.tag }}"
+          mkdir -p "$RUNNER_TEMP/feeds"; cp ${{ steps.meta.outputs.feeds }} "$RUNNER_TEMP/feeds/"
+          git fetch -q origin main
+          git switch -q -C feed-update origin/main
+          cp "$RUNNER_TEMP"/feeds/* .
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add ${{ steps.meta.outputs.feeds }}
+          git diff --cached --quiet && { echo "feeds unchanged"; exit 0; }
+          git commit -q -m "Engine feeds: $tag"
+          # loop: one push, rebased on a main that moved meanwhile (feed.yml commits Sonata's feeds) · at most 5 tries
+          for i in 1 2 3 4 5; do
+            git push -q origin HEAD:main && exit 0
+            sleep $((i * 3)); git pull -q --rebase origin main
+          done
+          echo "::error::could not push the engine feeds to main"; exit 1
       - name: Delete the hand-over branch
         env:
           GH_TOKEN: ${{ github.token }}

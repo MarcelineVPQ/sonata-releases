@@ -1,0 +1,67 @@
+name: Check engine feeds
+
+# The engine feeds (latest-engine.json: Stable, latest-engine-dev.json: Development) are written and
+# signed by the engine's own release workflow with the engine key, which never comes to this
+# repository, and committed here by publish-engine.yml. This checks them on every change and daily:
+# each .sig against engine-key.pub, the fields Sonata reads, the channel rules (no Development release
+# in the Stable feed, the Development feed never older than the Stable one), and that the tarball at
+# each url has the size, SHA-256 and signature the feed states. It writes nothing. Sonata's own feeds
+# (latest.json, latest-dev.json) are feed.yml's and are not read here.
+
+on:
+  push:
+    branches: [main]
+    paths: ['latest-engine.json', 'latest-engine.json.sig', 'latest-engine-dev.json', 'latest-engine-dev.json.sig', 'engine-key.pub']
+  workflow_dispatch:
+  schedule:
+    - cron: "17 7 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: main
+      - name: Check
+        run: |
+          set -euo pipefail
+          n=0
+          for feed in latest-engine.json latest-engine-dev.json; do
+            [ -f "$feed" ] || { echo "$feed: none yet"; continue; }
+            n=$((n + 1))
+            [ -f "$feed.sig" ] || { echo "::error::$feed has no .sig"; exit 1; }
+            base64 -d "$feed.sig" > "$RUNNER_TEMP/feed.sig"
+            openssl pkeyutl -verify -pubin -inkey engine-key.pub -rawin -in "$feed" -sigfile "$RUNNER_TEMP/feed.sig"
+            for k in channel name version tag prerelease protocol python platform file url size sha256 sig key licence released notes_url; do
+              jq -e "has(\"$k\")" "$feed" >/dev/null || { echo "::error::$feed has no \"$k\""; exit 1; }
+            done
+            v="$(jq -r .version "$feed")"; tag="$(jq -r .tag "$feed")"; f="$(jq -r .file "$feed")"
+            [ "$tag" = "engine-v$v" ] && [ "$f" = "sonata-engine-$v-linux-x86_64.tar.gz" ] || { echo "::error::$feed: names do not agree"; exit 1; }
+            [ "$(jq -r .key "$feed")" = "$(grep -v '^-----' engine-key.pub | tr -d '\n')" ] || { echo "::error::$feed names another key"; exit 1; }
+            want=stable; [ "$feed" = latest-engine-dev.json ] && want=dev
+            [ "$(jq -r .channel "$feed")" = "$want" ] || { echo "::error::$feed is not the $want feed"; exit 1; }
+            if [ "$want" = stable ] && [ "$(jq -r .prerelease "$feed")" = true ]; then echo "::error::a Development engine in the Stable feed"; exit 1; fi
+            curl -fsSL --retry 5 --retry-delay 5 -o "$RUNNER_TEMP/e.tar.gz" "$(jq -r .url "$feed")"
+            [ "$(stat -c %s "$RUNNER_TEMP/e.tar.gz")" = "$(jq -r .size "$feed")" ] || { echo "::error::$feed: size differs"; exit 1; }
+            [ "$(sha256sum "$RUNNER_TEMP/e.tar.gz" | cut -c1-64)" = "$(jq -r .sha256 "$feed")" ] || { echo "::error::$feed: sha256 differs"; exit 1; }
+            jq -r .sig "$feed" | base64 -d > "$RUNNER_TEMP/t.sig"
+            openssl pkeyutl -verify -pubin -inkey engine-key.pub -rawin -in "$RUNNER_TEMP/e.tar.gz" -sigfile "$RUNNER_TEMP/t.sig"
+            # the release is published and is a pre-release (engine releases never take "Latest")
+            gh release view "$tag" -R "$GITHUB_REPOSITORY" --json isPrerelease -q .isPrerelease | grep -qx true || { echo "::error::$tag is not a published pre-release"; exit 1; }
+            echo "$feed: $want $v ok (protocol $(jq -r .protocol "$feed"), python $(jq -r .python "$feed"), licence $(jq -r .licence.version "$feed"))"
+          done
+          if [ -f latest-engine.json ] && [ -f latest-engine-dev.json ]; then
+            s="$(jq -r .version latest-engine.json)"; d="$(jq -r .version latest-engine-dev.json)"
+            # Development carries stable releases too: it is never older than Stable
+            python3 -c 'import re, sys
+          k = lambda v: (lambda m: tuple(int(x) for x in m.groups()[:3]) + (int(m.group(4)) if m.group(4) else 10**9,))(re.match(r"(\d+)\.(\d+)\.(\d+)(?:-dev\.(\d+))?$", v))
+          sys.exit(0 if k(sys.argv[2]) >= k(sys.argv[1]) else 1)' "$s" "$d" || { echo "::error::the Development feed ($d) is older than Stable ($s)"; exit 1; }
+          fi
+          [ "$n" -gt 0 ] || echo "::notice::no engine feed yet"
+        env:
+          GH_TOKEN: ${{ github.token }}
