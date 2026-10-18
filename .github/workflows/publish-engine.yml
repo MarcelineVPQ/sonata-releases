@@ -3,8 +3,9 @@ name: Publish engine
 # The engine's release workflow hands each helper release over as a branch
 # incoming-engine/engine-vX.Y.Z: release.json, notes.md, the tarball, its .sig and SHA256SUMS
 # (binaries only). This checks the signature against
-# engine-key.pub on main, publishes the release engine-vX.Y.Z (never marked "latest": Sonata's legacy
-# updater reads releases/latest) and deletes the branch.
+# engine-key.pub on main, publishes the release engine-vX.Y.Z as a pre-release (so it never takes "Latest": with
+# --latest=false alone GitHub still shows it as Latest while no Sonata release is newer, and the
+# releases page would lead visitors to the helper) and deletes the branch.
 
 on:
   push:
@@ -49,7 +50,7 @@ jobs:
         run: |
           set -euo pipefail
           tag="${{ steps.meta.outputs.tag }}"; f="${{ steps.meta.outputs.file }}"
-          gh release create "$tag" -R "$GITHUB_REPOSITORY" --target main --latest=false --title "Sonata engine ${tag#engine-v}" --notes-file notes.md "$f" "$f.sig" SHA256SUMS
+          gh release create "$tag" -R "$GITHUB_REPOSITORY" --target main --prerelease --latest=false --title "Sonata engine ${tag#engine-v}" --notes-file notes.md "$f" "$f.sig" SHA256SUMS
       - name: Delete the hand-over branch
         env:
           GH_TOKEN: ${{ github.token }}
