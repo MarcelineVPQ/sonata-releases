@@ -68,9 +68,27 @@ jobs:
           if [ -f tools/verdicts.js ]; then node tools/verdicts.js --check; fi
           if [ -f tools/set-version.js ]; then node tools/set-version.js --verify "$tag"; fi
           [ "v$(node -p 'require("./package.json").version')" = "$tag" ] || { echo "::error::package.json version is not $tag"; exit 1; }
+      # Look-ahead play's delay helper (0.15.55-dev.1 on): native/lookahead/sonata-lookahead.c, built with gcc
+      # against the PipeWire headers and shipped in the AppImage's resources (package.json extraResources)
+      - name: Build the look-ahead helper (from the archive)
+        working-directory: src
+        run: |
+          set -euo pipefail
+          if [ -f native/lookahead/build.sh ]; then
+            sudo apt-get update -q
+            sudo apt-get install -y -q --no-install-recommends gcc libpipewire-0.3-dev libspa-0.2-dev
+            bash native/lookahead/build.sh
+          fi
       - name: Build AppImage (from the archive)
         working-directory: src
-        run: npx electron-builder --linux AppImage --publish never
+        run: |
+          set -euo pipefail
+          npx electron-builder --linux AppImage --publish never
+          if [ -f native/lookahead/build.sh ]; then
+            h=dist/linux-unpacked/resources/lookahead/sonata-lookahead
+            [ -x "$h" ] || { echo "::error::the AppImage has no look-ahead helper ($h)"; exit 1; }
+            file "$h"
+          fi
       - name: Collect files and SHA256SUMS
         run: |
           set -euo pipefail
