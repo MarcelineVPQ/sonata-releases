@@ -1,22 +1,22 @@
 {
   "channel": "dev",
   "name": "sonata-engine",
-  "version": "0.2.12-dev.1",
-  "tag": "engine-v0.2.12-dev.1",
+  "version": "0.2.13-dev.1",
+  "tag": "engine-v0.2.13-dev.1",
   "prerelease": true,
   "protocol": 2,
   "python": "3.14",
   "platform": "linux-x86_64",
-  "file": "sonata-engine-0.2.12-dev.1-linux-x86_64.tar.gz",
-  "url": "https://github.com/MarcelineVPQ/sonata-releases/releases/download/engine-v0.2.12-dev.1/sonata-engine-0.2.12-dev.1-linux-x86_64.tar.gz",
-  "size": 2898630,
-  "sha256": "b8cb68b13b836e88d001ded8ea9e1e0119e03ac30610d764acb468dee711b7f4",
-  "sig": "hcZUzNJ/9q+OCVEsZx5XCKpw7J313f8iSdqS7fMwF1IEf6fpe0VoEn6TsydW67tHERjlxQ1AIu0XYlBuDpi+Dw==",
+  "file": "sonata-engine-0.2.13-dev.1-linux-x86_64.tar.gz",
+  "url": "https://github.com/MarcelineVPQ/sonata-releases/releases/download/engine-v0.2.13-dev.1/sonata-engine-0.2.13-dev.1-linux-x86_64.tar.gz",
+  "size": 3323461,
+  "sha256": "393abd835f979bdc8d9a8bfe9f6e677deaa7a867ce97b33f5c46b4c5cc5dddc5",
+  "sig": "Tlm83vkPcqK7URzydeUkQ3fjckteZh5kjN5NRKVWXwMVDm/8LwADqJhOk8cuX7v8Zij6hHbjVgW4lptOuFxzCQ==",
   "key": "MCowBQYDK2VwAyEAo6A58PmODt4/8+9fga0sDbKb4BP3OCu8zBuryOy9gQc=",
   "licence": {
     "version": "draft-1",
     "sha256": "b7aa2dc8ac837311238104f60fe08f715d111464a8b5456300c614b4ecfda5e0"
   },
-  "released": "2026-10-21T02:05:47Z",
-  "notes_url": "https://github.com/MarcelineVPQ/sonata-releases/releases/tag/engine-v0.2.12-dev.1"
+  "released": "2026-10-21T03:43:02Z",
+  "notes_url": "https://github.com/MarcelineVPQ/sonata-releases/releases/tag/engine-v0.2.13-dev.1"
 }
